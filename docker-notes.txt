@@ -1,0 +1,7 @@
+docker build --build-arg PYTHON_VERSION=3.7.0-alpine3.8 --file Dockerfile-base --tag artifactory.foxsports.com.au:5001/fsa/diskover-base:1.5.0-rc18 .
+docker build --build-arg DISKOVER_VERSION=1.5.0-rc18 --file Dockerfile-diskover --tag artifactory.foxsports.com.au:5001/fsa/diskover:1.5.0-rc18 .
+docker build --build-arg DISKOVER_VERSION=1.5.0-rc18 --file Dockerfile-worker-bot --tag artifactory.foxsports.com.au:5001/fsa/diskover-worker-bot:1.5.0-rc18 .
+
+
+docker run --network host --volume c:/Users/javier.azabache/Work/Projects:/diskover/rootdir --rm artifactory.foxsports.com.au:5001/fsa/diskover:1.5.0-rc18
+docker run --network host --volume c:/Users/javier.azabache/Work/Projects:/diskover/rootdir --rm artifactory.foxsports.com.au:5001/fsa/diskover-worker-bot:1.5.0-rc18

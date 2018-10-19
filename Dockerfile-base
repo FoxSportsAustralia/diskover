@@ -1,0 +1,17 @@
+ARG PYTHON_VERSION
+FROM artifactory.foxsports.com.au:5003/python:${PYTHON_VERSION}
+
+ENV DISKOVER_WORKDIR /diskover
+ENV DISKOVER_CONFIG ${DISKOVER_WORKDIR}/diskover.cfg
+ENV DISKOVER_ROOTDIR ${DISKOVER_WORKDIR}/rootdir
+ENV DISKOVER_PLUGINDIR ${DISKOVER_WORKDIR}/plugins
+
+WORKDIR ${DISKOVER_WORKDIR}
+
+COPY LICENSE *.py *.sh requirements.txt diskover.cfg ${DISKOVER_WORKDIR}/
+COPY /plugins ${DISKOVER_PLUGINDIR}
+
+RUN mkdir ${DISKOVER_ROOTDIR}; \
+    pip install -r requirements.txt
+
+VOLUME ["${DISKOVER_ROOTDIR}"]

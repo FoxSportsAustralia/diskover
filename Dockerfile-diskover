@@ -1,0 +1,7 @@
+ARG DISKOVER_VERSION
+FROM artifactory.foxsports.com.au:5001/fsa/diskover-base:${DISKOVER_VERSION}
+
+EXPOSE 9999/tcp 9998/tcp
+
+ENTRYPOINT ["python", "diskover.py"]
+CMD ["--rootdir", "/diskover/rootdir"]
