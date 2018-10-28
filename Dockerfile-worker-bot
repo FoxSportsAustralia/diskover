@@ -1,4 +1,4 @@
 ARG DISKOVER_VERSION
-FROM artifactory.foxsports.com.au:5001/fsa/diskover-base:$DISKOVER_VERSION
+FROM artifactory.foxsports.com.au:5003/fsa/diskover-base:$DISKOVER_VERSION
 
 ENTRYPOINT ["python", "diskover_worker_bot.py"]
