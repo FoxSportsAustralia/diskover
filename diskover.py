@@ -11,17 +11,8 @@ diskover is released under the Apache 2.0 license. See
 LICENSE for the full license text.
 """
 
-try:
-    from elasticsearch5 import Elasticsearch, helpers, RequestsHttpConnection, \
-        Urllib3HttpConnection
-except ImportError:
-    try:
-        from elasticsearch import Elasticsearch, helpers, RequestsHttpConnection, \
-            Urllib3HttpConnection
-    except ImportError:
-        raise ImportError('elasticsearch module not installed')
-from scandir import walk
-from redis import Redis
+#from scandir import walk
+from diskover_lswalk import lswalk as walk
 from rq import Worker, Queue
 from datetime import datetime
 from random import randint
@@ -41,7 +32,7 @@ import sys
 import json
 
 
-version = '1.5.0-rc18'
+version = '1.5.0-rc19'
 __version__ = version
 
 IS_PY3 = sys.version_info >= (3, 0)
@@ -253,6 +244,10 @@ def load_config():
     except ConfigParser.NoOptionError:
         configsettings['index_translog_size'] = "512mb"
     try:
+        configsettings['es_scrollsize'] = int(config.get('elasticsearch', 'scrollsize'))
+    except ConfigParser.NoOptionError:
+        configsettings['es_scrollsize'] = 100
+    try:
         configsettings['redis_host'] = config.get('redis', 'host')
     except ConfigParser.NoOptionError:
         configsettings['redis_host'] = "localhost"
@@ -432,30 +427,6 @@ def list_plugins():
         print(plugin_info["name"])
 
 
-def elasticsearch_connect(config):
-    """This is the Elasticsearch connect function.
-    It creates the connection to Elasticsearch and returns es instance.
-    """
-
-    # Check if we are using AWS es
-    if config['aws'] == "True" or config['aws'] == "true":
-        es = Elasticsearch(
-            hosts=[{'host': config['es_host'], 'port': config['es_port']}],
-            use_ssl=True, verify_certs=True,
-            connection_class=RequestsHttpConnection,
-            timeout=config['es_timeout'], maxsize=config['es_maxsize'],
-            max_retries=config['es_max_retries'], retry_on_timeout=True)
-    # Local connection to es
-    else:
-        es = Elasticsearch(
-            hosts=[{'host': config['es_host'], 'port': config['es_port']}],
-            http_auth=(config['es_user'], config['es_password']),
-            connection_class=Urllib3HttpConnection,
-            timeout=config['es_timeout'], maxsize=config['es_maxsize'],
-            max_retries=config['es_max_retries'], retry_on_timeout=True)
-    return es
-
-
 def index_create(indexname):
     """This is the es index create function.
     It checks for existing index and deletes if
@@ -482,9 +453,11 @@ def index_create(indexname):
             es.indices.delete(index=indexname, ignore=[400, 404])
     # set up es index mappings and create new index
     if cliargs['qumulo']:
-        mappings = diskover_qumulo.get_qumulo_mappings(config)
+        from diskover_qumulo import get_qumulo_mappings
+        mappings = get_qumulo_mappings(config)
     elif cliargs['s3']:
-        mappings = diskover_s3.get_s3_mappings(config)
+        from diskover_s3 import get_s3_mappings
+        mappings = get_s3_mappings(config)
     else:
         mappings = {
             "settings": {
@@ -705,8 +678,9 @@ def index_bulk_add(es, doclist, config, cliargs):
                           request_timeout=config['es_timeout'])
 
     # bulk load data to Elasticsearch index
-    helpers.bulk(es, doclist, index=cliargs['index'], chunk_size=config['es_chunksize'],
+    diskover_connections.helpers.bulk(es, doclist, index=cliargs['index'], chunk_size=config['es_chunksize'],
                  request_timeout=config['es_timeout'])
+
 
 
 def index_delete_path(path, cliargs, logger, reindex_dict, recursive=False):
@@ -756,7 +730,7 @@ def index_delete_path(path, cliargs, logger, reindex_dict, recursive=False):
     logger.info('Searching for all files in %s' % path)
     # search es and start scroll
     res = es.search(index=cliargs['index'], doc_type='file', scroll='1m',
-                    size=1000, body=data,
+                    size=config['es_scrollsize'], body=data,
                     request_timeout=config['es_timeout'])
 
     while res['hits']['hits'] and len(res['hits']['hits']) > 0:
@@ -818,7 +792,7 @@ def index_delete_path(path, cliargs, logger, reindex_dict, recursive=False):
     logger.info('Searching for all directories in %s' % path)
     # search es and start scroll
     res = es.search(index=cliargs['index'], doc_type='directory', scroll='1m',
-                    size=1000, body=data, request_timeout=config['es_timeout'])
+                    size=config['es_scrollsize'], body=data, request_timeout=config['es_timeout'])
 
     while res['hits']['hits'] and len(res['hits']['hits']) > 0:
         for hit in res['hits']['hits']:
@@ -877,7 +851,7 @@ def index_get_docs(cliargs, logger, doctype='directory', copytags=False, hotdirs
 
     # search es and start scroll
     res = es.search(index=index, doc_type=doctype, scroll='1m',
-                    size=1000, body=data, request_timeout=config['es_timeout'])
+                    size=config['es_scrollsize'], body=data, request_timeout=config['es_timeout'])
 
     doclist = []
     doccount = 0
@@ -922,7 +896,7 @@ def index_get_docs_generator(cliargs, logger, doctype='directory', copytags=Fals
 
     # search es and start scroll
     res = es.search(index=index, doc_type=doctype, scroll='1m',
-                    size=1000, body=data, request_timeout=config['es_timeout'])
+                    size=config['es_scrollsize'], body=data, request_timeout=config['es_timeout'])
 
     doclist = []
     doccount = 0
@@ -940,18 +914,16 @@ def index_get_docs_generator(cliargs, logger, doctype='directory', copytags=Fals
                     hit['_source']['last_modified'],
                     '%Y-%m-%dT%H:%M:%S').timetuple())
                 doclist.append((hit['_id'], fullpath, mtime, doctype))
-                if len(doclist) >= 1000:
-                    logger.debug(doclist)
-                    yield doclist
-                    del doclist[:]
             doccount += 1
+        # yield results before loop
+        yield doclist
+        del doclist[:]
         # use es scroll api
         res = es.scroll(scroll_id=res['_scroll_id'], scroll='1m',
                         request_timeout=config['es_timeout'])
 
     logger.info('Found %s %s docs' % (str(doccount), doctype))
 
-    logger.debug(doclist)
     yield doclist
 
 
@@ -1254,6 +1226,10 @@ def parse_cli_args(indexname):
                         version="diskover v%s" % version,
                         help="Prints version and exits")
     args = parser.parse_args()
+    if args.index:
+        args.index = args.index.lower()
+    if args.index2:
+        args.index2 = args.index2.lower()
     return args
 
 
@@ -1307,7 +1283,7 @@ def log_setup(cliargs):
 
 
 def progress_bar(event):
-    if event == 'Crawling' or event == 'Checking':
+    if event == 'Crawling' or event == 'Checking' or event == 'Calculating(gen)':
         widgets = [progressbar.AnimatedMarker(), ' ', event + ' (Queue: ', progressbar.Counter(), ') ', progressbar.Timer()]
         bar = progressbar.ProgressBar(widgets=widgets, max_value=progressbar.UnknownLength)
     else:
@@ -1322,7 +1298,6 @@ def adaptive_batch(q, cliargs, batchsize):
     It auto adjusts the batch size sent to rq.
     Could be made better :)
     """
-    batchsize_prev = batchsize
     q_len = len(q)
     if q_len == 0:
         if (batchsize - ab_step) >= ab_start:
@@ -1335,27 +1310,8 @@ def adaptive_batch(q, cliargs, batchsize):
     return batchsize
 
 
-def update_progress_bar_dircalcs(bar, jobcount):
-    workers_busy = False
-    workers = Worker.all(connection=redis_conn)
-    for worker in workers:
-        if worker._state == "busy":
-            workers_busy = True
-            break
-    q_len = len(q_calc)
-    if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
-        try:
-            percent = int("{0:.0f}".format(100 * ((jobcount - q_len) / float(jobcount))))
-            bar.update(percent)
-        except ZeroDivisionError:
-            bar.update(0)
-        except ValueError:
-            bar.update(0)
-    return q_len, workers_busy
-
-
 def calc_dir_sizes(cliargs, logger, path=None):
-    import diskover_worker_bot
+    from diskover_bot_module import calc_dir_size
     # maximum tree depth to calculate
     maxdepth = cliargs['maxdcdepth']
     jobcount = 0
@@ -1377,37 +1333,55 @@ def calc_dir_sizes(cliargs, logger, path=None):
             logger.info('Getting diskover bots to calculate directory sizes (maxdepth %s)...' % maxdepth)
 
             if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
-                bar = progress_bar('Calculating')
+                bar = progress_bar('Calculating(gen)')
                 bar.start()
             else:
                 bar = None
 
             if path:
-                for items in index_get_docs_generator(cliargs, logger, path=path):
-                    for d in items:
-                        dirbatch.append(d)
-                        if len(dirbatch) >= batchsize:
-                            q_calc.enqueue(diskover_worker_bot.calc_dir_size, args=(dirbatch, cliargs,))
-                            jobcount += 1
-                            del dirbatch[:]
-                            if cliargs['adaptivebatch']:
-                                batchsize = adaptive_batch(q_calc, cliargs, batchsize)
-                        update_progress_bar_dircalcs(bar, jobcount)
+                for dirlist in index_get_docs_generator(cliargs, logger, path=path):
+                    q_calc.enqueue(calc_dir_size, args=(dirlist, cliargs,))
+                    jobcount += 1
+                    # update progress bar
+                    if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
+                        try:
+                            bar.update(len(q_calc))
+                        except ZeroDivisionError:
+                            bar.update(0)
+                        except ValueError:
+                            bar.update(0)
             else:
-                for items in index_get_docs_generator(cliargs, logger, sort=True, maxdepth=maxdepth):
-                    for d in items:
-                        dirbatch.append(d)
-                        if len(dirbatch) >= batchsize:
-                            q_calc.enqueue(diskover_worker_bot.calc_dir_size, args=(dirbatch, cliargs,))
-                            jobcount += 1
-                            del dirbatch[:]
-                            if cliargs['adaptivebatch']:
-                                batchsize = adaptive_batch(q_calc, cliargs, batchsize)
-                        update_progress_bar_dircalcs(bar, jobcount)
+                for dirlist in index_get_docs_generator(cliargs, logger, sort=True, maxdepth=maxdepth):
+                    q_calc.enqueue(calc_dir_size, args=(dirlist, cliargs,))
+                    jobcount += 1
+                    # update progress bar
+                    if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
+                        try:
+                            bar.update(len(q_calc))
+                        except ZeroDivisionError:
+                            bar.update(0)
+                        except ValueError:
+                            bar.update(0)
 
-            # add any remaining in batch to queue
-            q_calc.enqueue(diskover_worker_bot.calc_dir_size, args=(dirbatch, cliargs,))
-            jobcount += 1
+            # wait for queue to be empty and update progress bar
+            while True:
+                workers_busy = False
+                workers = Worker.all(connection=redis_conn)
+                for worker in workers:
+                    if worker._state == "busy":
+                        workers_busy = True
+                        break
+                q_len = len(q_calc)
+                if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
+                    try:
+                        bar.update(q_len)
+                    except ZeroDivisionError:
+                        bar.update(0)
+                    except ValueError:
+                        bar.update(0)
+                if q_len == 0 and workers_busy == False:
+                    break
+                time.sleep(.5)
 
         # wait to get all docs returned to dirlist
         else:
@@ -1427,22 +1401,36 @@ def calc_dir_sizes(cliargs, logger, path=None):
             for d in dirlist:
                 dirbatch.append(d)
                 if len(dirbatch) >= batchsize:
-                    logger.debug(dirbatch)
-                    q_calc.enqueue(diskover_worker_bot.calc_dir_size, args=(dirbatch, cliargs,))
+                    #logger.debug(dirbatch)
+                    q_calc.enqueue(calc_dir_size, args=(dirbatch, cliargs,))
                     jobcount += 1
                     del dirbatch[:]
                     if cliargs['adaptivebatch']:
                         batchsize = adaptive_batch(q_calc, cliargs, batchsize)
 
             # add any remaining in batch to queue
-            logger.debug(dirbatch)
-            q_calc.enqueue(diskover_worker_bot.calc_dir_size, args=(dirbatch, cliargs,))
+            #logger.debug(dirbatch)
+            q_calc.enqueue(calc_dir_size, args=(dirbatch, cliargs,))
             jobcount += 1
 
             # wait for queue to be empty and update progress bar
             time.sleep(1)
             while True:
-                q_len, workers_busy = update_progress_bar_dircalcs(bar, jobcount)
+                workers_busy = False
+                workers = Worker.all(connection=redis_conn)
+                for worker in workers:
+                    if worker._state == "busy":
+                        workers_busy = True
+                        break
+                q_len = len(q_calc)
+                if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
+                    try:
+                        percent = int("{0:.0f}".format(100 * ((jobcount - q_len) / float(jobcount))))
+                        bar.update(percent)
+                    except ZeroDivisionError:
+                        bar.update(0)
+                    except ValueError:
+                        bar.update(0)
                 if q_len == 0 and workers_busy == False:
                     break
                 time.sleep(.5)
@@ -1458,22 +1446,22 @@ def calc_dir_sizes(cliargs, logger, path=None):
 
 def treewalk(path, num_sep, level, batchsize, cliargs, reindex_dict, bar):
     """This is the tree walk function.
-    It walks the tree using scandir walk and adds tuple of directory and
-    it's files to redis queue for rq worker bots to scrape meta and upload
+    It walks the tree and adds tuple of directory and it's items
+    to redis queue for rq worker bots to scrape meta and upload
     to ES index after batch size (dir count) has been reached.
     """
-    import diskover_worker_bot
+    from diskover_bot_module import scrape_tree_meta
     batch = []
 
     for root, dirs, files in walk(path):
-        if len(dirs) == 0 and len(files) == 0 and not cliargs['indexemptydirs']:
-            continue
         if not dir_excluded(root, config, cliargs['verbose']):
-            batch.append((root, files))
+            # check for emptry dirs
+            if len(dirs) == 0 and len(files) == 0 and not cliargs['indexemptydirs']:
+                continue
+            batch.append((root, dirs, files))
             batch_len = len(batch)
             if batch_len >= batchsize:
-                q_crawl.enqueue(diskover_worker_bot.scrape_tree_meta,
-                                args=(batch, cliargs, reindex_dict,))
+                q_crawl.enqueue(scrape_tree_meta, args=(batch, cliargs, reindex_dict,))
                 del batch[:]
                 if cliargs['adaptivebatch']:
                     batchsize = adaptive_batch(q_crawl, cliargs, batchsize)
@@ -1499,7 +1487,7 @@ def treewalk(path, num_sep, level, batchsize, cliargs, reindex_dict, bar):
                 bar.update(0)
 
     # add any remaining in batch to queue
-    q_crawl.enqueue(diskover_worker_bot.scrape_tree_meta, args=(batch, cliargs, reindex_dict,))
+    q_crawl.enqueue(scrape_tree_meta, args=(batch, cliargs, reindex_dict,))
 
     # wait for queue to be empty and update progress bar
     while True:
@@ -1519,6 +1507,7 @@ def treewalk(path, num_sep, level, batchsize, cliargs, reindex_dict, bar):
                 bar.update(0)
         if q_len == 0 and workers_busy == False:
             break
+        time.sleep(.5)
 
 
 def crawl_tree(path, cliargs, logger, reindex_dict):
@@ -1544,6 +1533,8 @@ def crawl_tree(path, cliargs, logger, reindex_dict):
             if cliargs['verbose'] or cliargs['debug']:
                 logger.info('Batch size: %s' % batchsize)
             logger.info("Sending batches of %s to worker bots", batchsize)
+            if batchsize < 50:
+                logger.warning("Using a small batch size can decrease performance")
 
         # set maxdepth level to 1 if reindex or crawlbot (non-recursive)
         if cliargs['reindex'] or cliargs['crawlbot']:
@@ -1557,8 +1548,8 @@ def crawl_tree(path, cliargs, logger, reindex_dict):
 
         # check for listenlwc socket cli flag to start socket server
         if cliargs['listentwc']:
-            import diskover_socket_server
-            starttime = diskover_socket_server.start_socket_server_twc(rootdir_path, num_sep, level, batchsize,
+            from diskover_socket_server import start_socket_server_twc
+            starttime = start_socket_server_twc(rootdir_path, num_sep, level, batchsize,
                                                                    cliargs, logger, reindex_dict)
             return starttime
 
@@ -1574,8 +1565,9 @@ def crawl_tree(path, cliargs, logger, reindex_dict):
 
         # qumulo api crawl
         if cliargs['qumulo']:
-            qumulo_ip, qumulo_ses = diskover_qumulo.qumulo_connection()
-            diskover_qumulo.qumulo_treewalk(path, qumulo_ip, qumulo_ses, q_crawl, num_sep, level, batchsize,
+            from diskover_qumulo import qumulo_connection, qumulo_treewalk
+            qumulo_ip, qumulo_ses = qumulo_connection()
+            qumulo_treewalk(path, qumulo_ip, qumulo_ses, q_crawl, num_sep, level, batchsize,
                                             cliargs, reindex_dict, bar)
         # regular crawl using scandir/walk
         else:
@@ -1595,6 +1587,7 @@ def crawl_tree(path, cliargs, logger, reindex_dict):
 
 
 def hotdirs():
+    from diskover_bot_module import calc_hot_dirs
     """This is the calculate hot dirs function.
     """
     logger.info('Getting diskover bots to calculate change percent '
@@ -1612,13 +1605,13 @@ def hotdirs():
     for d in dirlist:
         dirbatch.append(d)
         if len(dirbatch) >= batchsize:
-            q.enqueue(diskover_worker_bot.calc_hot_dirs, args=(dirbatch, cliargs,))
+            q.enqueue(calc_hot_dirs, args=(dirbatch, cliargs,))
             del dirbatch[:]
             if cliargs['adaptivebatch']:
                 batchsize = adaptive_batch(q, cliargs, batchsize)
 
     # add any remaining in batch to queue
-    q.enqueue(diskover_worker_bot.calc_hot_dirs, args=(dirbatch, cliargs,))
+    q.enqueue(calc_hot_dirs, args=(dirbatch, cliargs,))
 
     if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
         bar = progress_bar('Checking')
@@ -1765,7 +1758,8 @@ def pre_crawl_tasks():
     # add disk space info to es index
     if not cliargs['reindex'] and not cliargs['reindexrecurs']:
         if cliargs['qumulo']:
-            diskover_qumulo.qumulo_add_diskspace(es, cliargs['index'], rootdir_path, qumulo_ip, qumulo_ses, logger)
+            from diskover_qumulo import qumulo_add_diskspace
+            qumulo_add_diskspace(es, cliargs['index'], rootdir_path, qumulo_ip, qumulo_ses, logger)
         else:
             add_diskspace(cliargs['index'], logger, rootdir_path)
 
@@ -1778,12 +1772,18 @@ ab_start = config['adaptivebatch_startsize']
 ab_max = config['adaptivebatch_maxsize']
 ab_step = config['adaptivebatch_stepsize']
 
+# load any available plugins
+plugins = load_plugins()
+
+import diskover_connections
+
 # create Elasticsearch connection
-es = elasticsearch_connect(config)
+diskover_connections.connect_to_elasticsearch()
+from diskover_connections import es_conn as es
 
 # create Reddis connection
-redis_conn = Redis(host=config['redis_host'], port=config['redis_port'],
-                   password=config['redis_password'], db=config['redis_db'])
+diskover_connections.connect_to_redis()
+from diskover_connections import redis_conn
 
 # Redis queue names
 listen = [config['redis_queue'], config['redis_queue_crawl'], config['redis_queue_calcdir']]
@@ -1792,9 +1792,6 @@ listen = [config['redis_queue'], config['redis_queue_crawl'], config['redis_queu
 q = Queue(listen[0], connection=redis_conn, default_timeout=config['redis_rq_timeout'])
 q_crawl = Queue(listen[1], connection=redis_conn, default_timeout=config['redis_rq_timeout'])
 q_calc = Queue(listen[2], connection=redis_conn, default_timeout=config['redis_rq_timeout'])
-
-# load any available plugins
-plugins = load_plugins()
 
 
 if __name__ == "__main__":
@@ -1856,42 +1853,41 @@ if __name__ == "__main__":
 
     # check for listen socket cli flag to start socket server
     if cliargs['listen']:
-        import diskover_socket_server
-        diskover_socket_server.start_socket_server(cliargs, logger)
+        from diskover_socket_server import start_socket_server
+        start_socket_server(cliargs, logger)
         sys.exit(0)
 
     # check for gource cli flags
     if cliargs['gourcert'] or cliargs['gourcemt']:
         try:
-            import diskover_gource
-            diskover_gource.gource(es, cliargs)
+            from diskover_gource import gource
+            gource(es, cliargs)
         except KeyboardInterrupt:
             print('\nCtrl-c keyboard interrupt received, exiting')
         sys.exit(0)
 
     # tag duplicate files if cli argument
     if cliargs['finddupes']:
-        import diskover_worker_bot
-        import diskover_dupes
+        from diskover_dupes import dupes_finder
         wait_for_worker_bots(logger)
         # Set up worker threads for duplicate file checker queue
-        diskover_dupes.dupes_finder(es, q, cliargs, logger)
+        dupes_finder(es, q, cliargs, logger)
         logger.info('DONE checking for dupes! Sayonara!')
         sys.exit(0)
 
     # copy tags from index2 to index if cli argument
     if cliargs['copytags']:
-        import diskover_worker_bot
+        from diskover_bot_module import tag_copier
         wait_for_worker_bots(logger)
         logger.info('Copying tags from %s to %s', cliargs['copytags'][0], cliargs['index'])
         # look in index2 for all directory docs with tags and add to queue
         dirlist = index_get_docs(cliargs, logger, doctype='directory', copytags=True, index=cliargs['copytags'][0])
         for path in dirlist:
-            q.enqueue(diskover_worker_bot.tag_copier, args=(path, cliargs,))
+            q.enqueue(tag_copier, args=(path, cliargs,))
         # look in index2 for all file docs with tags and add to queue
         filelist = index_get_docs(cliargs, logger, doctype='file', copytags=True, index=cliargs['copytags'][0])
         for path in filelist:
-            q.enqueue(diskover_worker_bot.tag_copier, args=(path, cliargs,))
+            q.enqueue(tag_copier, args=(path, cliargs,))
         if len(dirlist) == 0 and len(filelist) == 0:
             logger.info('No tags to copy')
         else:
@@ -1901,7 +1897,6 @@ if __name__ == "__main__":
 
     # Calculate directory change percent from index2 to index if cli argument
     if cliargs['hotdirs']:
-        import diskover_worker_bot
         wait_for_worker_bots(logger)
         hotdirs()
         logger.info('DONE finding hotdirs! Sayonara!')
@@ -1922,19 +1917,19 @@ if __name__ == "__main__":
         if cliargs['rootdir'] == '.' or cliargs['rootdir'] == "":
             logger.error("Rootdir path missing, use -d /rootdir, exiting")
             sys.exit(1)
-        import diskover_qumulo
+        from diskover_qumulo import qumulo_connection, qumulo_get_file_attr
         logger.info('Connecting to Qumulo storage api... (--qumulo)')
-        qumulo_ip, qumulo_ses = diskover_qumulo.qumulo_connection()
+        qumulo_ip, qumulo_ses = qumulo_connection()
         logger.info('Connected to Qumulo api at %s' % qumulo_ip)
         # check using qumulo api
         try:
-            diskover_qumulo.qumulo_get_file_attr(cliargs['rootdir'], qumulo_ip, qumulo_ses)
+            qumulo_get_file_attr(cliargs['rootdir'], qumulo_ip, qumulo_ses)
         except ValueError:
             logger.error("Rootdir path not found or not a directory, exiting")
             sys.exit(1)
     elif cliargs['s3']:
         # ingest s3 inventory files
-        import diskover_s3
+        from diskover_s3 import start_importing
         rootdir_path = '/'
         cliargs['rootdir'] = rootdir_path
         logger.debug('Excluded dirs: %s', config['excluded_dirs'])
@@ -1956,7 +1951,7 @@ if __name__ == "__main__":
         starttime = time.time()
 
         # start importing
-        diskover_s3.start_importing(es, cliargs, logger)
+        start_importing(es, cliargs, logger)
 
         # add elapsed time crawl stat to es
         add_crawl_stats(es, cliargs['index'], rootdir_path, (time.time() - starttime), "finished_crawl")
@@ -2013,12 +2008,11 @@ if __name__ == "__main__":
 
     # start crawlbot if cli argument
     if cliargs['crawlbot']:
-        import diskover_crawlbot
-        import diskover_worker_bot
+        from diskover_crawlbot import start_crawlbot_scanner
         wait_for_worker_bots(logger)
         botdirlist = index_get_docs(cliargs, logger, doctype='directory')
         # Set up worker threads for crawlbot
-        diskover_crawlbot.start_crawlbot_scanner(cliargs, logger, rootdir_path, botdirlist, reindex_dict)
+        start_crawlbot_scanner(cliargs, logger, rootdir_path, botdirlist, reindex_dict)
         sys.exit(0)
 
     pre_crawl_tasks()
