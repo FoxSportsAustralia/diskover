@@ -1,9 +1,28 @@
 docker build --build-arg PYTHON_VERSION=3.7.1-slim-stretch --file Dockerfile-base --tag artifactory.foxsports.com.au:5002/fsa/diskover-base:1.5.0-rc18 .
-docker push artifactory.foxsports.com.au:5002/fsa/diskover-base:1.5.0-rc18
+docker build --build-arg DISKOVER_VERSION=1.5.0-rc18 --file Dockerfile-ftp --tag artifactory.foxsports.com.au:5002/fsa/diskover-base-ftp:1.5.0-rc18 .
 docker build --build-arg DISKOVER_VERSION=1.5.0-rc18 --file Dockerfile-diskover --tag artifactory.foxsports.com.au:5002/fsa/diskover:1.5.0-rc18 .
-docker push artifactory.foxsports.com.au:5002/fsa/diskover:1.5.0-rc18
+docker build --build-arg DISKOVER_VERSION=1.5.0-rc18 --file Dockerfile-diskover-ftp --tag artifactory.foxsports.com.au:5002/fsa/diskover-ftp:1.5.0-rc18 .
 docker build --build-arg DISKOVER_VERSION=1.5.0-rc18 --file Dockerfile-worker-bot --tag artifactory.foxsports.com.au:5002/fsa/diskover-worker-bot:1.5.0-rc18 .
-docker push artifactory.foxsports.com.au:5002/fsa/diskover-worker-bot:1.5.0-rc18
+docker build --build-arg DISKOVER_VERSION=1.5.0-rc18 --file Dockerfile-worker-bot-ftp --tag artifactory.foxsports.com.au:5002/fsa/diskover-worker-bot-ftp:1.5.0-rc18 .
 
-docker run --network host --volume c:/Users/javier.azabache/Work/Projects:/diskover/rootdir --rm artifactory.foxsports.com.au:5003/fsa/diskover:1.5.0-rc18
-docker run --network host --volume c:/Users/javier.azabache/Work/Projects:/diskover/rootdir --rm artifactory.foxsports.com.au:5003/fsa/diskover-worker-bot:1.5.0-rc18
+docker push artifactory.foxsports.com.au:5002/fsa/diskover-base:1.5.0-rc18
+docker push artifactory.foxsports.com.au:5002/fsa/diskover-base-ftp:1.5.0-rc18
+docker push artifactory.foxsports.com.au:5002/fsa/diskover:1.5.0-rc18
+docker push artifactory.foxsports.com.au:5002/fsa/diskover-ftp:1.5.0-rc18
+docker push artifactory.foxsports.com.au:5002/fsa/diskover-worker-bot:1.5.0-rc18
+docker push artifactory.foxsports.com.au:5002/fsa/diskover-worker-bot-ftp:1.5.0-rc18
+
+
+# Run diskover
+docker run --network host --volume c:/Users/javier.azabache/Work/Projects:/diskover/rootdir --rm artifactory.foxsports.com.au:5002/fsa/diskover:1.5.0-rc18
+
+# Run diskover FTP (Need to run in privileged mode, otherwise curlftpfs won't be able to create the mount!)
+docker run --network host --privileged --rm artifactory.foxsports.com.au:5002/fsa/diskover:1.5.0-rc18
+
+# Run diskover bot in burst mode (Don't use the host network unless necessary)
+docker run --network host --volume c:/Users/javier.azabache/Work/Projects:/diskover/rootdir --rm artifactory.foxsports.com.au:5002/fsa/diskover-worker-bot:1.5.0-rc18 -b
+
+# Run diskover FTP bot in burst mode (Need to run in privileged mode, otherwise curlftpfs won't be able to create the mount!)
+docker run --network host --volume c:/Users/javier.azabache/Work/Projects:/diskover/rootdir --rm artifactory.foxsports.com.au:5002/fsa/diskover-worker-bot:1.5.0-rc18 -b
+
+#Note that both diskover and the worker bots must be looking at the same mounts!

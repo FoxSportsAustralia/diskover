@@ -1,0 +1,5 @@
+ARG DISKOVER_VERSION
+FROM artifactory.foxsports.com.au:5002/fsa/diskover-base:${DISKOVER_VERSION}
+
+RUN apt-get update; \
+    apt-get install curlftpfs --yes
