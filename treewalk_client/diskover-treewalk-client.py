@@ -23,7 +23,7 @@ try:
 except ImportError:
 	from queue import Queue
 
-version = '1.0.9'
+version = '1.0.12'
 __version__ = version
 
 
@@ -47,6 +47,11 @@ try:
 	TREEWALK_METHOD = sys.argv[5]
 	ROOTDIR_LOCAL = sys.argv[6]
 	ROOTDIR_REMOTE = sys.argv[7]
+	# remove any trailing slash from paths
+	if ROOTDIR_LOCAL != '/':
+		ROOTDIR_LOCAL = ROOTDIR_LOCAL.rstrip(os.path.sep)
+	if ROOTDIR_REMOTE != '/':
+		ROOTDIR_REMOTE = ROOTDIR_REMOTE.rstrip(os.path.sep)
 except IndexError:
 	print("Usage: " + sys.argv[0] + " <host> <port> <batch_size> <num_connections> <treewalk_method> <rootdir_local> <rootdir_remote>")
 	sys.exit(1)
@@ -82,7 +87,7 @@ def ls_worker():
 	while True:
 		item = q_ls.get()
 
-		lsCMD = ['ls', '-RFAwf', item]
+		lsCMD = ['ls', '-RFAf', item]
 		proc = Popen(lsCMD, bufsize=SP_BUFFSIZE, stdout=PIPE, close_fds=True)
 
 		dirs = []
@@ -192,16 +197,19 @@ if __name__ == "__main__":
 					del files[:]
 					continue
 				# check for symlinks
+				dirlist = []
+				filelist = []
 				for d in dirs:
-					if os.path.islink(os.path.join(root, d)):
-						dirs.remove(d)
+					if not os.path.islink(os.path.join(root, d)):
+						dirlist.append(d)
 				for f in files:
-					if os.path.islink(os.path.join(root, f)):
-						files.remove(f)
-				packet.append((root, dirs, files))
+					if not os.path.islink(os.path.join(root, f)):
+						filelist.append(f)
+				packet.append((root, dirlist, filelist))
 				if len(packet) >= BATCH_SIZE:
 					q.put(pickle.dumps(packet))
 					del packet [:]
+			q.put(pickle.dumps(packet))
 
 		elif TREEWALK_METHOD == "metaspider":
 			# use threads to collect meta and send to diskover proxy rather than
@@ -243,6 +251,7 @@ if __name__ == "__main__":
 				if len(packet) >= BATCH_SIZE:
 					q.put(pickle.dumps(packet))
 					del packet[:]
+			q.put(pickle.dumps(packet))
 
 		elif TREEWALK_METHOD == "lsthreaded":
 			dirs = []
@@ -271,7 +280,7 @@ if __name__ == "__main__":
 
 		elif TREEWALK_METHOD == "ls":
 			import subprocess
-			lsCMD = ['ls', '-RFAwf', ROOTDIR_LOCAL]
+			lsCMD = ['ls', '-RFAf', ROOTDIR_LOCAL]
 			proc = subprocess.Popen(lsCMD, bufsize=SP_BUFFSIZE, stdout=subprocess.PIPE, close_fds=True)
 
 			dirs = []
@@ -309,6 +318,7 @@ if __name__ == "__main__":
 					if os.path.basename(root) not in EXCLUDED_DIRS:
 						packet.append((root, dirs[:], nondirs[:]))
 					break
+			q.put(pickle.dumps(packet))
 
 		q.join()
 

@@ -1,15 +1,43 @@
 # Diskover Change Log
 
-## [1.5.0-rc19] = 2018-10-29
+## [1.5.0-rc21] = 2018-11-09
 ### added
+- much faster dir size updates at end of crawl
+- tree walk client v1.0.12
+- redis ttl (key/results expiry time) setting to diskover.cfg.sample, copy to your config file and set for your env
+### changed
+- dir size calculations are now done by diskover.py process and using size results returned from rq jobs, no longer enqueueing dir calc jobs to bots
+- removed workerbot section from diskover.cfg.sample including bot logging settings, remove from your config
+### fixed
+- bug with tree walk client not sending last batch of dirs
+- bug with tree walk client and not remove trailing slashes from paths causing traceback in diskver.py when updating dir sizes at end of crawl
+- bug with tree walk client and using ls walk method, ls: invalid line width: f
+- bug with diskover and using --lswalk, ls: invalid line width: f
+
+## [1.5.0-rc20] = 2018-11-03
+### NOTE
+- rc18 and rc19 had bugs with dir calcs and were calculating incorrect sizes, please update to rc20
+### added
+- improved socket server
+- improved dir calc speeds
+- cli arg -L --listentwc to listen for directory listings messages (pickle) from remote python diskover-treewalk-client.py
+- diskover-treewalk-client.py - v1.0.8 python client for diskover socket server to run direct on storage servers for faster tree walking (see wiki)
+- additional redis config options in diskover.cfg: db, timeout, queues (copy from diskover.cfg.sample into your config)
+- additional socket server options in diskover.cfg: maxconnections, twcport (copy from diskover.cfg.sample into your config))
+- can now specify different diskover config file using env var DISKOVER_CONFIG
+- cli arg --dircalcsonly for calculating sizes and item counts in all directory docs in existing index
 - diskover_connections.py
 - diskover_bot_module.py
 - diskover_lswalk.py
 - scrollsize (elasticsearch search scroll size) to diskover.cfg.sample elasticsearch section (copy to your diskover.cfg and adjust for your env)
-- job sharing between bots when doing dir calcs
+- --lswalk cli arg which uses custom lswalk generator (faster treewalk) instead of default scandir walk
 ### changed
+- updated diskover-bot-launcher.sh to v1.5
+- removed -q queue cli arg from diskover-bot-launcher.sh, use queues in diskover.cfg redis section
+- removed -q queue cli arg from diskover bots, use queues in diskover.cfg redis section
+- any uppercase index names are automatically lowercased (helge000 pr)
+- set file mode to 755 for py and sh files (helge000 pr)
 - switched to rq SimpleWorker since Worker was opening up new connections to es and redis due to fork for every new job
-- replaced scandir walk with custom lswalk generator (faster treewalk)
 - diskover-treewalk-client.py v1.0.9 - added lsthreaded tree walk method, threads adjustable at top of client py
 - diskover modules import cleanup
 - moved elasticsearch and redis connection code into diskover_connections.py
@@ -17,33 +45,15 @@
 - reduced output logging for worker bots
 - removed threads for file meta scraping and es bulk adding in worker bots as did not see any real performance gain
 - removed job passing between bots as did not provide any performance gain
-### fixed
-- --dircalcsgen taking a long time
-
-## [1.5.0-rc18] = 2018-10-23
-### added
-- reduced time for directory calculations
-- improved socket server
-- cli arg -L --listentwc to listen for directory listings messages (pickle) from remote python diskover-treewalk-client.py
-- diskover-treewalk-client.py - v1.0.8 python client for diskover socket server to run direct on storage servers for faster tree walking (see wiki)
-- additional redis config options in diskover.cfg: db, timeout, queues (copy from diskover.cfg.sample into your config)
-- additional socket server options in diskover.cfg: maxconnections, twcport (copy from diskover.cfg.sample into your config))
-- can now specify different diskover config file using env var DISKOVER_CONFIG
-- cli arg --dircalcsonly for calculating sizes and item counts in all directory docs in existing index
-- cli arg --dircalcsgen yields directory results during es scroll to fill the queue rather than waiting for all directory docs list
-during getting directory doc results from es rather than waiting for all docs to be returned before bots start calculating
-### changed
-- directory docs now store their actual filesize, items, items_files, items_subdirs when indexed (non-recursive values), this is to help speed up
-directory calulations at end of crawl
-- updated diskover-bot-launcher.sh to v1.5
-- removed -q queue cli arg from diskover-bot-launcher.sh, use queues in diskover.cfg redis section
-- removed -q queue cli arg from diskover bots, use queues in diskover.cfg redis section
-- any uppercase index names are automatically lowercased (helge000 pr)
-- set file mode to 755 for py and sh files (helge000 pr)
+- switched to generator for dir calcs to help speed up dir calc processing time
+- removed -n --nodelete cli arg, use --reindex or --reindexrecurs to add data to existing index
 ### fixed
 - file symlinks getting indexed
 - directories containing just symlinks (no actual file/subdirs) getting indexed
 - elasticsearch error when using index with uppercase letters (helge000 pr)
+- Qumulo api crawl
+- s3 inventory file importing
+- when using -O to optimize index at end of crawl, stack trace could occur if running longer than es timeout, added catch for this event
 
 ## [1.5.0-rc17] = 2018-10-04
 ### added

@@ -11,8 +11,7 @@ diskover is released under the Apache 2.0 license. See
 LICENSE for the full license text.
 """
 
-from diskover import config, escape_chars, q_crawl, q_calc, index_bulk_add, plugins
-from rq import Worker
+from diskover import config, escape_chars, index_bulk_add, plugins
 from datetime import datetime
 import argparse
 import os
@@ -23,7 +22,6 @@ import grp
 import time
 import re
 import base64
-from random import shuffle
 
 import diskover_connections
 
@@ -42,6 +40,8 @@ gids = []
 owners = {}
 groups = {}
 
+dirsizes = {}
+
 
 def parse_cliargs_bot():
     """This is the parse CLI arguments function.
@@ -58,7 +58,7 @@ def get_worker_name():
     """This is the get worker name function.
     It returns worker name hostname.pid .
     """
-    return '{0}.{1}'.format(socket.gethostname().partition('.')[0], os.getppid())
+    return '{0}.{1}'.format(socket.gethostname().partition('.')[0], os.getpid())
 
 
 def auto_tag(metadict, type, mtime, atime, ctime):
@@ -522,7 +522,7 @@ def get_file_meta(worker_name, path, cliargs, reindex_dict, statsembeded=False):
 
         # check if file is in exluded_files list
         extension = os.path.splitext(filename)[1][1:].strip().lower()
-        if file_excluded(filename, extension, fullpath, cliargs['verbose']):
+        if file_excluded(filename, extension):
             return None
 
         if statsembeded:
@@ -654,21 +654,21 @@ def get_file_meta(worker_name, path, cliargs, reindex_dict, statsembeded=False):
 
 def calc_dir_size(dirlist, cliargs):
     """This is the calculate directory size worker function.
-    It gets a directory list from the Queue and searches ES for all
-    subdirs in each directory (recursive) and sums their filesize and
-    items fields to create a total filesize and item count for each directory doc.
-    Updates directory doc's filesize and items fields.
+    It gets a directory list from the Queue and searches ES for all files
+    in each directory (recursive) and sums their filesizes
+    to create a total filesize and item count for each dir.
+    Updates dir doc's filesize and items fields.
     """
 
     doclist = []
     for path in dirlist:
+        totalsize = 0
         totalitems = 1  # 1 for itself
+        totalitems_files = 0
+        totalitems_subdirs = 0
         # file doc search with aggregate for sum filesizes
         # escape special characters
         newpath = escape_chars(path[1])
-        parentpath = escape_chars(os.path.abspath(os.path.join(path[1], os.pardir)))
-        pathbasename = escape_chars(os.path.basename(path[1]))
-
         # create wildcard string and check for / (root) path
         if newpath == '\/':
             newpathwildcard = '\/*'
@@ -696,9 +696,10 @@ def calc_dir_size(dirlist, cliargs):
         else:
             data = {
                 "size": 0,
+                "_source": ['inode', 'filesize'],
                 "query": {
                     "query_string": {
-                        'query': '(path_parent: ' + parentpath + ' AND filename: ' + pathbasename + ') OR path_parent: ' + newpath + ' OR path_parent: ' + newpathwildcard,
+                        'query': 'path_parent: ' + newpath + ' OR path_parent: ' + newpathwildcard,
                         'analyze_wildcard': 'true'
                     }
                 },
@@ -707,34 +708,31 @@ def calc_dir_size(dirlist, cliargs):
                         "sum": {
                             "field": "filesize"
                         }
-                    },
-                    "total_files": {
-                        "sum": {
-                            "field": "items_files"
-                        }
-                    },
-                    "total_subdirs": {
-                        "sum": {
-                            "field": "items_subdirs"
-                        }
                     }
                 }
             }
 
-        # search ES and start scroll for all directory doc search (subdirs)
+        # search ES and start scroll
+        res = es.search(index=cliargs['index'], doc_type='file', body=data,
+                        request_timeout=config['es_timeout'])
+
+        # total items sum
+        totalitems_files += res['hits']['total']
+
+        # total file size sum
+        totalsize += res['aggregations']['total_size']['value']
+
+        # directory doc search (subdirs)
+
+        # search ES and start scroll
         res = es.search(index=cliargs['index'], doc_type='directory', body=data,
                         request_timeout=config['es_timeout'])
 
-        # total file size sum
-        totalsize = res['aggregations']['total_size']['value']
+        # total items sum
+        totalitems_subdirs += res['hits']['total']
 
-        # total items sum for all subdirs count
-        totalitems_subdirs = res['aggregations']['total_subdirs']['value']
-
-        # total items sum for all files count
-        totalitems_files = res['aggregations']['total_files']['value']
-
-        totalitems += totalitems_subdirs + totalitems_files
+        # total items
+        totalitems += totalitems_files + totalitems_subdirs
 
         # update filesize and items fields for directory (path) doc
         d = {
@@ -757,12 +755,11 @@ def es_bulk_add(worker_name, dirlist, filelist, cliargs, totalcrawltime=None):
     docs = dirlist + filelist
     index_bulk_add(es, docs, config, cliargs)
 
-    if not cliargs['reindex'] and not cliargs['reindexrecurs'] and not cliargs['crawlbot']:
-        data = {"worker_name": worker_name, "dir_count": len(dirlist),
-                "file_count": len(filelist), "bulk_time": round(time.time() - starttime, 6),
-                "crawl_time": round(totalcrawltime, 6),
-                "indexing_date": datetime.utcnow().isoformat()}
-        es.index(index=cliargs['index'], doc_type='worker', body=data)
+    data = {"worker_name": worker_name, "dir_count": len(dirlist),
+            "file_count": len(filelist), "bulk_time": round(time.time() - starttime, 6),
+            "crawl_time": round(totalcrawltime, 6),
+            "indexing_date": datetime.utcnow().isoformat()}
+    es.index(index=cliargs['index'], doc_type='worker', body=data)
 
 
 def get_metadata(path, cliargs):
@@ -795,7 +792,7 @@ def get_metadata(path, cliargs):
     }
     files_source = []
     res = es.search(index=cliargs['index2'], doc_type='file', scroll='1m',
-                    size=1000, body=data, request_timeout=config['es_timeout'])
+                    size=config['es_scrollsize'], body=data, request_timeout=config['es_timeout'])
 
     while res['hits']['hits'] and len(res['hits']['hits']) > 0:
         for hit in res['hits']['hits']:
@@ -810,6 +807,7 @@ def get_metadata(path, cliargs):
 
 
 def scrape_tree_meta(paths, cliargs, reindex_dict):
+    global dirsizes
     worker = get_worker_name()
     tree_dirs = []
     tree_files = []
@@ -819,19 +817,16 @@ def scrape_tree_meta(paths, cliargs, reindex_dict):
     else:
         qumulo = False
     totalcrawltime = 0
+    statsembeded = False
 
     for path in paths:
         starttime = time.time()
         root, dirs, files = path
-        totaldirsize = 0
-        totaldiritems_subdirs = len(dirs)
-        totaldiritems_files = 0
+        dirsizes[root] = {}
+        dirsize = 0
+        diritems_files = 0
+        diritems_subdirs = len(dirs)
 
-        # check if stats embeded in data from diskover tree walk client
-        if type(root) is tuple:
-            statsembeded = True
-        else:
-            statsembeded = False
         if qumulo:
             if root['path'] != '/':
                 root_path = root['path'].rstrip(os.path.sep)
@@ -839,7 +834,9 @@ def scrape_tree_meta(paths, cliargs, reindex_dict):
                 root_path = root['path']
             dmeta = qumulo_get_dir_meta(worker, root, cliargs, reindex_dict, redis_conn)
         else:
-            if statsembeded:
+            # check if stats embeded in data from diskover tree walk client
+            if type(root) is tuple:
+                statsembeded = True
                 root_path = root[0]
                 dmeta = get_dir_meta(worker, root, cliargs, reindex_dict, statsembeded=True)
             else:
@@ -874,9 +871,6 @@ def scrape_tree_meta(paths, cliargs, reindex_dict):
                     fmeta = get_file_meta(worker, file, cliargs, reindex_dict, statsembeded=True)
                     if fmeta:
                         tree_files.append(fmeta)
-                        # add file size to totaldirsize
-                        totaldirsize += fmeta['filesize']
-                        totaldiritems_files += 1
             else:
                 for file in files:
                     if qumulo:
@@ -886,19 +880,32 @@ def scrape_tree_meta(paths, cliargs, reindex_dict):
                                              reindex_dict, statsembeded=False)
                     if fmeta:
                         tree_files.append(fmeta)
-                        # add file size to totaldirsize
-                        totaldirsize += fmeta['filesize']
-                        totaldiritems_files += 1
+                        # add filesize to dirsize
+                        dirsize += fmeta['filesize']
+                        # add to diritems_files count
+                        diritems_files += 1
+
+            # update dirsizes
+            dirsizes[root]['filesize'] = dirsize
+            dirsizes[root]['items_files'] = diritems_files
+            dirsizes[root]['items_subdirs'] = diritems_subdirs
+            dirsizes[root]['items'] = diritems_files + diritems_subdirs + 1  # 1 for itself
+            # add directory size to all dir paths above
+            p = os.path.sep.join(root.split(os.path.sep)[:-1])
+            while len(p) >= len(cliargs['rootdir']):
+                try:
+                    dirsizes[p]
+                except KeyError:
+                    dirsizes[p] = {'filesize': 0, 'items_files': 0, 'items_subdirs': 0, 'items': 0}
+                dirsizes[p]['filesize'] += dirsize
+                dirsizes[p]['items_files'] += diritems_files
+                dirsizes[p]['items_subdirs'] += diritems_subdirs
+                dirsizes[p]['items'] += diritems_files + diritems_subdirs
+                p = os.path.sep.join(p.split(os.path.sep)[:-1])
 
             # update crawl time
             elapsed = time.time() - starttime
             dmeta['crawl_time'] = round(elapsed, 6)
-            # update directory meta filesize, items
-            dmeta['filesize'] = totaldirsize
-            dmeta['items_files'] = totaldiritems_files
-            dmeta['items_subdirs'] = totaldiritems_subdirs
-            totaldiritems = totaldiritems_files + totaldiritems_subdirs
-            dmeta['items'] += totaldiritems
             tree_dirs.append(dmeta)
             totalcrawltime += elapsed
 
@@ -915,8 +922,10 @@ def scrape_tree_meta(paths, cliargs, reindex_dict):
     if len(tree_dirs) > 0 or len(tree_files) > 0:
         es_bulk_add(worker, tree_dirs, tree_files, cliargs, totalcrawltime)
 
+    return worker, dirsizes
 
-def file_excluded(filename, extension, path, verbose):
+
+def file_excluded(filename, extension):
     """Return True if path or ext in excluded_files set,
     False if not in the set"""
     # return if filename in included list (whitelist)
@@ -1012,7 +1021,6 @@ def calc_hot_dirs(dirlist, cliargs):
     """
     doclist = []
 
-    dir_id_list = []
     for path in dirlist:
         # doc search (matching path) in index2
         # filename
@@ -1096,3 +1104,8 @@ def calc_hot_dirs(dirlist, cliargs):
         doclist.append(d)
 
     index_bulk_add(es, doclist, config, cliargs)
+
+
+def purge_dirsizes():
+    global dirsizes
+    dirsizes = {}

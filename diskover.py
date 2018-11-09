@@ -11,9 +11,7 @@ diskover is released under the Apache 2.0 license. See
 LICENSE for the full license text.
 """
 
-#from scandir import walk
-from diskover_lswalk import lswalk as walk
-from rq import Worker, Queue
+from rq import SimpleWorker, Queue
 from datetime import datetime
 from random import randint
 try:
@@ -32,7 +30,7 @@ import sys
 import json
 
 
-version = '1.5.0-rc19'
+version = '1.5.0-rc21'
 __version__ = version
 
 IS_PY3 = sys.version_info >= (3, 0)
@@ -276,6 +274,10 @@ def load_config():
     except ConfigParser.NoOptionError:
         configsettings['redis_rq_timeout'] = 86400
     try:
+        configsettings['redis_ttl'] = int(config.get('redis', 'ttl'))
+    except ConfigParser.NoOptionError:
+        configsettings['redis_ttl'] = 500
+    try:
         configsettings['redis_queue'] = config.get('redis', 'queue')
     except ConfigParser.NoOptionError:
         configsettings['redis_queue'] = "diskover"
@@ -436,16 +438,14 @@ def index_create(indexname):
     logger.info('Checking es index: %s', indexname)
     # check for existing es index
     if es.indices.exists(index=indexname):
-        # check if nodelete, reindex, cli argument
-        # and don't delete existing index
+        # check if crawlbot or reindex cli argument and don't delete existing index
         if cliargs['reindex']:
             logger.info('Reindexing (non-recursive, preserving tags)')
             return
         elif cliargs['reindexrecurs']:
             logger.info('Reindexing (recursive, preserving tags)')
             return
-        elif cliargs['nodelete']:
-            logger.info('Adding to es index')
+        elif cliargs['crawlbot']:
             return
         # delete existing index
         else:
@@ -830,15 +830,14 @@ def index_delete_path(path, cliargs, logger, reindex_dict, recursive=False):
 
 
 def index_get_docs(cliargs, logger, doctype='directory', copytags=False, hotdirs=False,
-                   index=None, path=None, sort=False, maxdepth=None):
+                   index=None, path=None, sort=False, maxdepth=None, id_lists=False):
     """This is the es get docs function.
     It finds all docs (by doctype) in es and returns doclist
     which contains doc id, fullpath and mtime for all docs.
-    If yielddocs is True, will yield as it scroll es index rather than waiting
-    for all docs to be found and added to doclist.
     If copytags is True will return tags from previous index.
     If path is specified will return just documents in and under directory path.
     If sort is True, will return paths in asc path order.
+    if id_lists is True, will return two lists, one with full paths and other with their id
     """
 
     if index is None:
@@ -854,6 +853,7 @@ def index_get_docs(cliargs, logger, doctype='directory', copytags=False, hotdirs
                     size=config['es_scrollsize'], body=data, request_timeout=config['es_timeout'])
 
     doclist = []
+    pathlist = []
     doccount = 0
     while res['hits']['hits'] and len(res['hits']['hits']) > 0:
         for hit in res['hits']['hits']:
@@ -863,6 +863,9 @@ def index_get_docs(cliargs, logger, doctype='directory', copytags=False, hotdirs
             elif hotdirs:
                 doclist.append((hit['_id'], fullpath, hit['_source']['filesize'], hit['_source']['items'],
                                 hit['_source']['items_files'], hit['_source']['items_subdirs']))
+            elif id_lists:
+                doclist.append(hit['_id'])
+                pathlist.append(fullpath)
             else:
                 # convert es time to unix time format
                 mtime = time.mktime(datetime.strptime(
@@ -876,7 +879,10 @@ def index_get_docs(cliargs, logger, doctype='directory', copytags=False, hotdirs
 
     logger.info('Found %s %s docs' % (str(doccount), doctype))
 
-    return doclist
+    if id_lists:
+        return doclist, pathlist
+    else:
+        return doclist
 
 
 def index_get_docs_generator(cliargs, logger, doctype='directory', copytags=False, hotdirs=False,
@@ -1163,31 +1169,26 @@ def parse_cli_args(indexname):
     parser.add_argument("-I", "--index2", metavar='INDEX2', nargs=1,
                         help="Compare directory times with previous index to get metadata \
                             from index2 instead of off disk (requires cached dir times in Redis)")
-    parser.add_argument("-n", "--nodelete", action="store_true",
-                        help="Add data to existing index (default: overwrite \
-                        index)")
-    parser.add_argument("-M", "--maxdepth", type=int, default=100,
-                        help="Maximum directory depth to crawl (default: \
-                        100)")
-    parser.add_argument("-c", "--maxdcdepth", type=int, default=100,
-                        help="Maximum directory depth to calculate directory sizes/items (default: \
-                            100)")
+    parser.add_argument("-M", "--maxdepth", type=int, default=None,
+                        help="Maximum directory depth to crawl (default: None), does not work with lswalk")
+    parser.add_argument("-c", "--maxdcdepth", type=int, default=None,
+                        help="Maximum directory depth to calculate directory sizes/items (default: None)")
     parser.add_argument("-b", "--batchsize", type=int, default=50,
-                        help="Batch size (dir count) for sending to worker bots (default: \
-                            50)")
+                        help="Batch size (dir count) for sending to worker bots (default: 50)")
     parser.add_argument("-a", "--adaptivebatch", action="store_true",
                         help="Adaptive batch size for sending to worker bots (intelligent crawl)")
+    parser.add_argument("--lswalk", action="store_true",
+                        help="Use ls walk instead of scandir walk, does not work with maxdepth")
     parser.add_argument("-A", "--autotag", action="store_true",
                         help="Get bots to auto-tag files/dirs based on patterns in config")
     parser.add_argument("-O", "--optimizeindex", action="store_true",
                         help="Optimize index at end of crawl (reduce size)")
     parser.add_argument("-r", "--reindex", action="store_true",
-                        help="Reindex directory (non-recursive)")
+                        help="Reindex directory (non-recursive), data is added to existing index")
     parser.add_argument("-R", "--reindexrecurs", action="store_true",
-                        help="Reindex directory and all subdirs (recursive)")
+                        help="Reindex directory and all subdirs (recursive), data is added to existing index")
     parser.add_argument("-D", "--finddupes", action="store_true",
-                        help="Find duplicate files in existing index and update \
-                            their dupe_md5 field")
+                        help="Find duplicate files in existing index and update their dupe_md5 field")
     parser.add_argument("-C", "--copytags", metavar='INDEX2', nargs=1,
                         help="Copy tags from index2 to index")
     parser.add_argument("-H", "--hotdirs", metavar='INDEX2', nargs=1,
@@ -1198,8 +1199,7 @@ def parse_cli_args(indexname):
     parser.add_argument("-L", "--listentwc", action="store_true",
                         help="Start tcp socket server and listen for messages from diskover treewalk client")
     parser.add_argument("-B", "--crawlbot", action="store_true",
-                        help="Starts up crawl bot continuous scanner \
-                            to scan for dir changes in index")
+                        help="Starts up crawl bot continuous scanner to scan for dir changes in index")
     parser.add_argument("--qumulo", action="store_true",
                         help="Qumulo storage type, use Qumulo api instead of scandir")
     parser.add_argument("--s3", metavar='FILE', nargs='+',
@@ -1207,9 +1207,6 @@ def parse_cli_args(indexname):
     parser.add_argument("--dircalcsonly", action="store_true",
                         help="Calculate sizes and item counts for each directory doc in existing index \
                                 (done automatically after each crawl)")
-    parser.add_argument("--dircalcsgen", action="store_true",
-                        help="During dir calcs, uses generator to yield directory docs instead of waiting \
-                                for all docs to be returned (fills queue as ES results are returned)")
     parser.add_argument("--gourcert", action="store_true",
                         help="Get realtime crawl data from ES for gource")
     parser.add_argument("--gourcemt", action="store_true",
@@ -1283,7 +1280,7 @@ def log_setup(cliargs):
 
 
 def progress_bar(event):
-    if event == 'Crawling' or event == 'Checking' or event == 'Calculating(gen)':
+    if event == 'Crawling' or event == 'Checking' or event == 'Calculating':
         widgets = [progressbar.AnimatedMarker(), ' ', event + ' (Queue: ', progressbar.Counter(), ') ', progressbar.Timer()]
         bar = progressbar.ProgressBar(widgets=widgets, max_value=progressbar.UnknownLength)
     else:
@@ -1315,7 +1312,6 @@ def calc_dir_sizes(cliargs, logger, path=None):
     # maximum tree depth to calculate
     maxdepth = cliargs['maxdcdepth']
     jobcount = 0
-    dirbatch = []
 
     try:
         check_workers_running(logger)
@@ -1328,112 +1324,58 @@ def calc_dir_sizes(cliargs, logger, path=None):
             logger.info('Batch size: %s' % batchsize)
 
         # use generator and yield docs while scrolling index in es
-        if cliargs['dircalcsgen']:
+        logger.info('Getting diskover bots to calculate directory sizes (maxdepth %s)...' % maxdepth)
 
-            logger.info('Getting diskover bots to calculate directory sizes (maxdepth %s)...' % maxdepth)
-
-            if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
-                bar = progress_bar('Calculating(gen)')
-                bar.start()
-            else:
-                bar = None
-
-            if path:
-                for dirlist in index_get_docs_generator(cliargs, logger, path=path):
-                    q_calc.enqueue(calc_dir_size, args=(dirlist, cliargs,))
-                    jobcount += 1
-                    # update progress bar
-                    if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
-                        try:
-                            bar.update(len(q_calc))
-                        except ZeroDivisionError:
-                            bar.update(0)
-                        except ValueError:
-                            bar.update(0)
-            else:
-                for dirlist in index_get_docs_generator(cliargs, logger, sort=True, maxdepth=maxdepth):
-                    q_calc.enqueue(calc_dir_size, args=(dirlist, cliargs,))
-                    jobcount += 1
-                    # update progress bar
-                    if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
-                        try:
-                            bar.update(len(q_calc))
-                        except ZeroDivisionError:
-                            bar.update(0)
-                        except ValueError:
-                            bar.update(0)
-
-            # wait for queue to be empty and update progress bar
-            while True:
-                workers_busy = False
-                workers = Worker.all(connection=redis_conn)
-                for worker in workers:
-                    if worker._state == "busy":
-                        workers_busy = True
-                        break
-                q_len = len(q_calc)
-                if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
-                    try:
-                        bar.update(q_len)
-                    except ZeroDivisionError:
-                        bar.update(0)
-                    except ValueError:
-                        bar.update(0)
-                if q_len == 0 and workers_busy == False:
-                    break
-                time.sleep(.5)
-
-        # wait to get all docs returned to dirlist
+        if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
+            bar = progress_bar('Calculating')
+            bar.start()
         else:
-            if path:
-                dirlist = index_get_docs(cliargs, logger, path=path)
-            else:
-                dirlist = index_get_docs(cliargs, logger, sort=True, maxdepth=maxdepth)
+            bar = None
 
-            logger.info('Getting diskover bots to calculate directory sizes (maxdepth %s)...' % maxdepth)
-
-            if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
-                bar = progress_bar('Calculating')
-                bar.start()
-            else:
-                bar = None
-
-            for d in dirlist:
-                dirbatch.append(d)
-                if len(dirbatch) >= batchsize:
-                    #logger.debug(dirbatch)
-                    q_calc.enqueue(calc_dir_size, args=(dirbatch, cliargs,))
-                    jobcount += 1
-                    del dirbatch[:]
-                    if cliargs['adaptivebatch']:
-                        batchsize = adaptive_batch(q_calc, cliargs, batchsize)
-
-            # add any remaining in batch to queue
-            #logger.debug(dirbatch)
-            q_calc.enqueue(calc_dir_size, args=(dirbatch, cliargs,))
-            jobcount += 1
-
-            # wait for queue to be empty and update progress bar
-            time.sleep(1)
-            while True:
-                workers_busy = False
-                workers = Worker.all(connection=redis_conn)
-                for worker in workers:
-                    if worker._state == "busy":
-                        workers_busy = True
-                        break
-                q_len = len(q_calc)
+        if path:
+            for dirlist in index_get_docs_generator(cliargs, logger, path=path):
+                q_calc.enqueue(calc_dir_size, args=(dirlist, cliargs,), result_ttl=config['redis_ttl'])
+                jobcount += 1
+                # update progress bar
                 if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
                     try:
-                        percent = int("{0:.0f}".format(100 * ((jobcount - q_len) / float(jobcount))))
-                        bar.update(percent)
+                        bar.update(len(q_calc))
                     except ZeroDivisionError:
                         bar.update(0)
                     except ValueError:
                         bar.update(0)
-                if q_len == 0 and workers_busy == False:
+        else:
+            for dirlist in index_get_docs_generator(cliargs, logger, sort=True, maxdepth=maxdepth):
+                q_calc.enqueue(calc_dir_size, args=(dirlist, cliargs,), result_ttl=config['redis_ttl'])
+                jobcount += 1
+                # update progress bar
+                if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
+                    try:
+                        bar.update(len(q_calc))
+                    except ZeroDivisionError:
+                        bar.update(0)
+                    except ValueError:
+                        bar.update(0)
+
+        # wait for queue to be empty and update progress bar
+        while True:
+            workers_busy = False
+            workers = SimpleWorker.all(connection=redis_conn)
+            for worker in workers:
+                if worker._state == "busy":
+                    workers_busy = True
                     break
-                time.sleep(.5)
+            q_len = len(q_calc)
+            if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
+                try:
+                    bar.update(q_len)
+                except ZeroDivisionError:
+                    bar.update(0)
+                except ValueError:
+                    bar.update(0)
+            if q_len == 0 and workers_busy == False:
+                break
+            time.sleep(.5)
 
         if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
             bar.finish()
@@ -1444,34 +1386,53 @@ def calc_dir_sizes(cliargs, logger, path=None):
         sys.exit(0)
 
 
-def treewalk(path, num_sep, level, batchsize, cliargs, reindex_dict, bar):
+def treewalk(top, num_sep, level, batchsize, cliargs, reindex_dict, bar):
     """This is the tree walk function.
     It walks the tree and adds tuple of directory and it's items
     to redis queue for rq worker bots to scrape meta and upload
     to ES index after batch size (dir count) has been reached.
     """
     from diskover_bot_module import scrape_tree_meta
+    if cliargs['lswalk']:
+        from diskover_lswalk import lswalk as walk
+    else:
+        from scandir import walk
+    jobs = []
     batch = []
+    emptydircount = 0
 
-    for root, dirs, files in walk(path):
+    for root, dirs, files in walk(top):
         if not dir_excluded(root, config, cliargs['verbose']):
+            # check for symlinks
+            dirlist = []
+            filelist = []
+            for d in dirs:
+                if not os.path.islink(os.path.join(root, d)):
+                    dirlist.append(d)
+            for f in files:
+                if not os.path.islink(os.path.join(root, f)):
+                    filelist.append(f)
             # check for emptry dirs
-            if len(dirs) == 0 and len(files) == 0 and not cliargs['indexemptydirs']:
+            if len(dirlist) == 0 and len(filelist) == 0 and not cliargs['indexemptydirs']:
+                emptydircount += 1
                 continue
-            batch.append((root, dirs, files))
+            batch.append((root, dirlist, filelist))
             batch_len = len(batch)
             if batch_len >= batchsize:
-                q_crawl.enqueue(scrape_tree_meta, args=(batch, cliargs, reindex_dict,))
+                job = q_crawl.enqueue(scrape_tree_meta, args=(batch, cliargs, reindex_dict,),
+                                      result_ttl=config['redis_ttl'])
+                jobs.append(job)
                 del batch[:]
                 if cliargs['adaptivebatch']:
                     batchsize = adaptive_batch(q_crawl, cliargs, batchsize)
 
             # check if at maxdepth level and delete dirs/files lists to not
             # descend further down the tree
-            num_sep_this = root.count(os.path.sep)
-            if num_sep + level <= num_sep_this:
-                del dirs[:]
-                del files[:]
+            if cliargs['maxdepth']:
+                num_sep_this = root.count(os.path.sep)
+                if num_sep + level <= num_sep_this:
+                    del dirs[:]
+                    del files[:]
 
         else:  # directory excluded
             del dirs[:]
@@ -1487,12 +1448,13 @@ def treewalk(path, num_sep, level, batchsize, cliargs, reindex_dict, bar):
                 bar.update(0)
 
     # add any remaining in batch to queue
-    q_crawl.enqueue(scrape_tree_meta, args=(batch, cliargs, reindex_dict,))
+    job = q_crawl.enqueue(scrape_tree_meta, args=(batch, cliargs, reindex_dict,), result_ttl=config['redis_ttl'])
+    jobs.append(job)
 
     # wait for queue to be empty and update progress bar
     while True:
         workers_busy = False
-        workers = Worker.all(connection=redis_conn)
+        workers = SimpleWorker.all(connection=redis_conn)
         for worker in workers:
             if worker._state == "busy":
                 workers_busy = True
@@ -1508,6 +1470,8 @@ def treewalk(path, num_sep, level, batchsize, cliargs, reindex_dict, bar):
         if q_len == 0 and workers_busy == False:
             break
         time.sleep(.5)
+
+    return jobs, emptydircount
 
 
 def crawl_tree(path, cliargs, logger, reindex_dict):
@@ -1549,9 +1513,9 @@ def crawl_tree(path, cliargs, logger, reindex_dict):
         # check for listenlwc socket cli flag to start socket server
         if cliargs['listentwc']:
             from diskover_socket_server import start_socket_server_twc
-            starttime = start_socket_server_twc(rootdir_path, num_sep, level, batchsize,
-                                                                   cliargs, logger, reindex_dict)
-            return starttime
+            starttime, jobs, emptydircount = start_socket_server_twc(rootdir_path, num_sep, level, batchsize,
+                                                                     cliargs, logger, reindex_dict)
+            return starttime, jobs, emptydircount
 
         starttime = time.time()
 
@@ -1565,13 +1529,12 @@ def crawl_tree(path, cliargs, logger, reindex_dict):
 
         # qumulo api crawl
         if cliargs['qumulo']:
-            from diskover_qumulo import qumulo_connection, qumulo_treewalk
-            qumulo_ip, qumulo_ses = qumulo_connection()
-            qumulo_treewalk(path, qumulo_ip, qumulo_ses, q_crawl, num_sep, level, batchsize,
-                                            cliargs, reindex_dict, bar)
-        # regular crawl using scandir/walk
+            from diskover_qumulo import qumulo_treewalk
+            jobs, emptydircount = qumulo_treewalk(path, qumulo_ip, qumulo_ses, q_crawl, num_sep, level, batchsize,
+                                                  cliargs, reindex_dict, bar)
+        # regular crawl using walk
         else:
-            treewalk(path, num_sep, level, batchsize, cliargs, reindex_dict, bar)
+            jobs, emptydircount = treewalk(path, num_sep, level, batchsize, cliargs, reindex_dict, bar)
 
         if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
             bar.update(0)
@@ -1579,7 +1542,7 @@ def crawl_tree(path, cliargs, logger, reindex_dict):
 
         logger.info("Finished crawling!")
 
-        return starttime
+        return starttime, jobs, emptydircount
 
     except KeyboardInterrupt:
         print("Ctrl-c keyboard interrupt, shutting down...")
@@ -1605,13 +1568,13 @@ def hotdirs():
     for d in dirlist:
         dirbatch.append(d)
         if len(dirbatch) >= batchsize:
-            q.enqueue(calc_hot_dirs, args=(dirbatch, cliargs,))
+            q.enqueue(calc_hot_dirs, args=(dirbatch, cliargs,), result_ttl=config['redis_ttl'])
             del dirbatch[:]
             if cliargs['adaptivebatch']:
                 batchsize = adaptive_batch(q, cliargs, batchsize)
 
     # add any remaining in batch to queue
-    q.enqueue(calc_hot_dirs, args=(dirbatch, cliargs,))
+    q.enqueue(calc_hot_dirs, args=(dirbatch, cliargs,), result_ttl=config['redis_ttl'])
 
     if not cliargs['quiet'] and not cliargs['debug'] and not cliargs['verbose']:
         bar = progress_bar('Checking')
@@ -1623,7 +1586,7 @@ def hotdirs():
     time.sleep(1)
     while True:
         workers_busy = False
-        workers = Worker.all(connection=redis_conn)
+        workers = SimpleWorker.all(connection=redis_conn)
         for worker in workers:
             if worker._state == "busy":
                 workers_busy = True
@@ -1647,11 +1610,11 @@ def hotdirs():
 def wait_for_worker_bots(logger):
     """This is the wait for worker bots function.
     """
-    workers = Worker.all(connection=redis_conn)
+    workers = SimpleWorker.all(connection=redis_conn)
     while len(workers) == 0:
         logger.info('Waiting for diskover worker bots to start...')
         time.sleep(2)
-        workers = Worker.all(connection=redis_conn)
+        workers = SimpleWorker.all(connection=redis_conn)
     logger.info('Found %s diskover RQ worker bots', len(workers))
 
 
@@ -1661,7 +1624,7 @@ def check_workers_running(logger):
     logger.info('Waiting for diskover worker bots to be done with any jobs in rq...')
     busyworkers = []
     while True:
-        workers = Worker.all(connection=redis_conn)
+        workers = SimpleWorker.all(connection=redis_conn)
         for worker in workers:
             if worker._state == "busy":
                 busyworkers.append(worker._name)
@@ -1712,7 +1675,82 @@ def tune_es_for_crawl(defaults=False):
         # check if we should optimize index
         if cliargs['optimizeindex']:
             logger.info('Optimizing ES index... this could take a while... (-O)')
-            es.indices.forcemerge(index=cliargs['index'], max_num_segments=1, request_timeout=config['es_timeout'])
+            try:
+                es.indices.forcemerge(index=cliargs['index'], max_num_segments=1, request_timeout=config['es_timeout'])
+            except exceptions.ConnectionTimeout:
+                logger.info("Optimizing timed out, will finish in background")
+                pass
+
+
+def update_dir_sizes():
+    from diskover_bot_module import purge_dirsizes
+    dirsizes_by_worker = {}
+    dirsizes = {}
+
+    logger.info('Updating directory sizes...')
+
+    # get all the dirsizes back from the rq job results and store the last results for each path
+    for job in jobs:
+        while not job.result:
+            time.sleep(1)
+        worker_name, sizes = job.result
+        try:
+            dirsizes_by_worker[worker_name]
+        except KeyError:
+            dirsizes_by_worker[worker_name] = {}
+        for path, size in sizes.items():
+            dirsizes_by_worker[worker_name][path] = size
+
+    # sum all the worker path sizes
+    for worker_name, dirsize in dirsizes_by_worker.items():
+        for path, size in dirsize.items():
+            try:
+                dirsizes[path]
+            except KeyError:
+                dirsizes[path] = {'filesize': 0, 'items_files': 0, 'items_subdirs': 0, 'items': 0}
+            dirsizes[path]['filesize'] += size['filesize']
+            dirsizes[path]['items_files'] += size['items_files']
+            dirsizes[path]['items_subdirs'] += size['items_subdirs']
+            dirsizes[path]['items'] += size['items']
+
+    # update directory doc's filesize, items counts
+    es.indices.refresh(index=cliargs['index'])
+
+    # get all directory doc ids
+    ids, paths = index_get_docs(cliargs, logger, doctype='directory', id_lists=True)
+
+    bulkdocs = []
+    i = 0
+    with progressbar.ProgressBar(max_value=len(dirsizes)) as bar:
+        for path, size in dirsizes.items():
+            # subtract any empty dirs for rootdir doc
+            if path == rootdir_path:
+                size['items_subdirs'] = size['items_subdirs'] - emptydircount
+                size['items'] = size['items'] - emptydircount
+            # find location of path in paths list
+            x = paths.index(path)
+            # get doc id from ids list
+            docid = ids[x]
+            doc = {
+                '_op_type': 'update',
+                '_index': cliargs['index'],
+                '_type': 'directory',
+                '_id': docid,
+                'doc': {'filesize': size['filesize'], 'items_files': size['items_files'],
+                        'items_subdirs': size['items_subdirs'], 'items': size['items']}
+            }
+            bulkdocs.append(doc)
+            if len(bulkdocs) >= config['es_chunksize']:
+                index_bulk_add(es, bulkdocs, config, cliargs)
+                del bulkdocs[:]
+            i += 1
+            bar.update(i)
+        index_bulk_add(es, bulkdocs, config, cliargs)
+
+    # purge dirsizes from all workers
+    workers = SimpleWorker.all(connection=redis_conn)
+    for i in range(len(workers)):
+        q.enqueue(purge_dirsizes)
 
 
 def post_crawl_tasks():
@@ -1721,20 +1759,20 @@ def post_crawl_tasks():
     """
 
     # add elapsed time crawl stat to es
-    if not cliargs['reindex'] and not cliargs['reindexrecurs']:
-        add_crawl_stats(es, cliargs['index'], rootdir_path, (time.time() - starttime), "finished_crawl")
+    add_crawl_stats(es, cliargs['index'], rootdir_path, (time.time() - starttime), "finished_crawl")
 
     # calculate directory sizes and items
-    if cliargs['reindex'] or cliargs['reindexrecurs']:
+    if cliargs['reindex'] or cliargs['reindexrecurs'] or cliargs['crawlbot']:
         calc_dir_sizes(cliargs, logger, path=rootdir_path)
     else:
-        calc_dir_sizes(cliargs, logger)
+        #calc_dir_sizes(cliargs, logger)
+        update_dir_sizes()
 
     # add elapsed time crawl stat to es
-    if not cliargs['reindex'] and not cliargs['reindexrecurs']:
-        add_crawl_stats(es, cliargs['index'], rootdir_path, (time.time() - starttime), "finished_dircalc")
+    add_crawl_stats(es, cliargs['index'], rootdir_path, (time.time() - starttime), "finished_dircalc")
 
-    check_workers_running(logger)
+    if cliargs['reindex'] or cliargs['reindexrecurs'] or cliargs['crawlbot']:
+        check_workers_running(logger)
 
     # set Elasticsearch index settings back to default
     tune_es_for_crawl(defaults=True)
@@ -1745,8 +1783,7 @@ def pre_crawl_tasks():
     index_create(cliargs['index'])
 
     # add crawl stat to index
-    if not cliargs['reindex'] and not cliargs['reindexrecurs']:
-        add_crawl_stats(es, cliargs['index'], rootdir_path, 0, "running")
+    add_crawl_stats(es, cliargs['index'], rootdir_path, 0, "running")
 
     # optimize Elasticsearch index settings for crawling
     tune_es_for_crawl()
@@ -1756,7 +1793,7 @@ def pre_crawl_tasks():
         logger.info('Using %s for metadata cache (-I)' % cliargs['index2'][0])
 
     # add disk space info to es index
-    if not cliargs['reindex'] and not cliargs['reindexrecurs']:
+    if not cliargs['reindex'] and not cliargs['reindexrecurs'] and not cliargs['crawlbot']:
         if cliargs['qumulo']:
             from diskover_qumulo import qumulo_add_diskspace
             qumulo_add_diskspace(es, cliargs['index'], rootdir_path, qumulo_ip, qumulo_ses, logger)
@@ -1780,6 +1817,7 @@ import diskover_connections
 # create Elasticsearch connection
 diskover_connections.connect_to_elasticsearch()
 from diskover_connections import es_conn as es
+from diskover_connections import exceptions
 
 # create Reddis connection
 diskover_connections.connect_to_redis()
@@ -1883,11 +1921,11 @@ if __name__ == "__main__":
         # look in index2 for all directory docs with tags and add to queue
         dirlist = index_get_docs(cliargs, logger, doctype='directory', copytags=True, index=cliargs['copytags'][0])
         for path in dirlist:
-            q.enqueue(tag_copier, args=(path, cliargs,))
+            q.enqueue(tag_copier, args=(path, cliargs,), result_ttl=config['redis_ttl'])
         # look in index2 for all file docs with tags and add to queue
         filelist = index_get_docs(cliargs, logger, doctype='file', copytags=True, index=cliargs['copytags'][0])
         for path in filelist:
-            q.enqueue(tag_copier, args=(path, cliargs,))
+            q.enqueue(tag_copier, args=(path, cliargs,), result_ttl=config['redis_ttl'])
         if len(dirlist) == 0 and len(filelist) == 0:
             logger.info('No tags to copy')
         else:
@@ -2018,7 +2056,7 @@ if __name__ == "__main__":
     pre_crawl_tasks()
 
     # start crawling
-    starttime = crawl_tree(rootdir_path, cliargs, logger, reindex_dict)
+    starttime, jobs, emptydircount = crawl_tree(rootdir_path, cliargs, logger, reindex_dict)
 
     post_crawl_tasks()
 

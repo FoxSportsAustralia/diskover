@@ -117,18 +117,34 @@ Start diskover main job dispatcher and file tree crawler with (using adaptive ba
 $ python /path/to/diskover.py -d /rootpath/you/want/to/crawl -i diskover-indexname -a -O
 ```
 
-**Defaults for crawl with no flags is to index from . (current directory) and files >0 Bytes and 0 days modified time. Empty files and directores are skipped (unless you use -s 0 and -e flags). Max crawl depth is 100 and max depth for dir size calculations is 100 by default. Use -h to see cli options.**
+**Defaults for crawl with no flags is to index from . (current directory) and files >0 Bytes and 0 days modified time. Empty files and directores are skipped (unless you use -s 0 and -e flags). Symlinks are not followed and skipped. Use -h to see cli options.**
 
-Crawl down to maximum tree depth of 3 and only calculate dir size/items to level 3:
+Crawl tree using ls walk instead of scandir walk:
 
 ```sh
-$ python diskover.py -i diskover-indexname -a -d /rootpath/to/crawl -M 3 -c 3
+$ python /path/to/diskover.py -d /rootpath/you/want/to/crawl -i diskover-indexname -a --lswalk
+```
+
+Crawl down to maximum tree depth of 3 (does not work with --lswalk):
+
+```sh
+$ python diskover.py -i diskover-indexname -a -d /rootpath/to/crawl -M 3
 ```
 
 Only index files which are >90 days modified time and >1 KB filesize:
 
 ```sh
 $ python diskover.py -i diskover-indexname -a -d /rootpath/to/crawl -m 90 -s 1024
+```
+
+Create index with just level 1 directories and files, then run background crawls in parallel for each directory in rootdir and merge the data into same index. After all crawls are finished, calculate rootdir doc's size/items counts:
+
+```sh
+$ python diskover.py -i diskover-indexname -a -d /rootpath/to/crawl --maxdepth 1
+$ python diskover.py -i diskover-indexname -a -d /rootpath/to/crawl/dir1 --reindexrecurs --lswalk -q &
+$ python diskover.py -i diskover-indexname -a -d /rootpath/to/crawl/dir2 --reindexrecurs --lswalk -q &
+...
+$ python diskover.py -i diskover-indexname -a -d /rootpath/to/crawl --dircalcsonly --maxdcdepth 0
 ```
 
 Import Amazon S3 Inventory file(s) (gzipped csv) with:

@@ -69,6 +69,8 @@ dirtimesttl = 604800
 db = 0
 ; rq default time out in sec (default 86400)
 timeout = 86400
+; rq default ttl for key/results (default 500)
+ttl = 500
 ; rq queue names to use (default is diskover, diskover_crawl, diskover_calcdir)
 queue = diskover
 queuecrawl = diskover_crawl
@@ -82,13 +84,6 @@ startsize = 50
 maxsize = 500
 ; when adjusting batch size use this for +/- (increases when queue is 0, decreases when > 0)
 stepsize = 10
-
-[workerbot]
-; enable bot logs (True or False), bot logs will slow down crawl, use for debugging only
-botlogs = False
-; log file directory to store worker logs
-; log files are named diskover_bot_worker_<workername>_<time>_log
-logfiledir = /tmp
 
 [paths]
 ; used by diskover socket server
