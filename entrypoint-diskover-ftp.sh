@@ -13,6 +13,8 @@ while [ "$1" != "" ]; do
                 --ftp-path )            FTP_PATH=$2; shift 2;;
                 --ftp-username )        FTP_USR=$2; shift 2;;
                 --ftp-password )        FTP_PWD=$2; shift 2;;
+                --diskover-server )     DISKOVER_CMD="python diskover.py"; shift;;
+                --diskover-worker )     DISKOVER_CMD="python diskover_worker_bot.py"; shift;;
                 --)                     shift; break;;
                 * )                     DISKOVER_CMD="$DISKOVER_CMD $1"; shift;;
         esac 
@@ -20,7 +22,7 @@ done
 
 echo "Will mount ftp://$FTP_HOST:$FTP_PORT/$FTP_PATH on $DISKOVER_ROOTDIR"
 
-curlftpfs "ftp://$FTP_USR:$FTP_PWD@$FTP_HOST:$FTP_PORT/$FTP_PATH" "$DISKOVER_ROOTDIR"
+curlftpfs -r -o custom_list=LIST "ftp://$FTP_USR:$FTP_PWD@$FTP_HOST:$FTP_PORT/$FTP_PATH" "$DISKOVER_ROOTDIR"
 
 echo "Will execute: $DISKOVER_CMD"
 
