@@ -3,4 +3,5 @@ FROM artifactory.foxsports.com.au:5002/fsa/diskover-base-ftp:${DISKOVER_VERSION}
 
 EXPOSE 9999/tcp 9998/tcp
 
-ENTRYPOINT ["/bin/bash", "entrypoint-diskover-ftp.sh", "--rootdir", "/diskover/rootdir"]
+ENTRYPOINT ["/bin/bash", "entrypoint-diskover-ftp.sh", "--diskover-server"]
+CMD ["--rootdir", "/diskover/rootdir"]

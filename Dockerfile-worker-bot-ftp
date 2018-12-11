@@ -1,5 +1,4 @@
 ARG DISKOVER_VERSION
 FROM artifactory.foxsports.com.au:5002/fsa/diskover-base-ftp:${DISKOVER_VERSION}
 
-ENTRYPOINT ["/bin/bash", "entrypoint-diskover-worker-bot-ftp.sh"]
-CMD ["-b"]
+ENTRYPOINT ["/bin/bash", "entrypoint-diskover-ftp.sh", "--diskover-worker"]
